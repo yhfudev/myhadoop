@@ -16,7 +16,46 @@ if [ ${BASH_VERSINFO[0]} -lt 4 ]; then
     exit 1
 fi
 
-MH_HOME="$(dirname $(readlink -f $0))/.."
+# ChangeLog:
+#  2014-03-16
+#    1. read etc/myhadoop.conf from various directories.
+#      priority: environment variable < install dir < current dir < command line
+#    2. detect if remote node is accessable
+
+############################################################
+#DN_EXEC=`echo "$0" | ${EXEC_AWK} -F/ '{b=$1; for (i=2; i < NF; i ++) {b=b "/" $(i)}; print b}'`
+DN_EXEC="$(dirname $(readlink -f "$0"))"
+if [ ! "${DN_EXEC}" = "" ]; then
+    DN_EXEC="${DN_EXEC}/"
+else
+    DN_EXEC="./"
+fi
+
+############################################################
+# ssh
+# generate the cert of localhost
+if [ ! -f ~/.ssh/id_rsa.pub ]; then
+    echo "[DBG] generate id ..."
+    mkdir -p ~/.ssh/
+    ssh-keygen
+fi
+
+# ensure the success of the connection
+ssh_ensure_connection() {
+    PARAM_SSHURL="${1}"
+    echo "[DBG] test host: ${PARAM_SSHURL}" > /dev/stderr
+    $EXEC_SSH "${PARAM_SSHURL}" "ls > /dev/null"
+    if [ ! "$?" = "0" ]; then
+        #echo "[DBG] copy id to ${PARAM_SSHURL} ..."
+        #ssh-copy-id -i ~/.ssh/id_rsa.pub "${PARAM_SSHURL}"
+        echo "[DBG] the node is not accessable: ${PARAM_SSHURL}." > /dev/stderr
+        echo 1
+    else
+        echo "[DBG] connection detect passed node : ${PARAM_SSHURL}." > /dev/stderr
+        echo 0
+    fi
+}
+############################################################
 
 function mh_print {
     echo "myHadoop: $@"
@@ -29,23 +68,27 @@ function print_usage {
         specify number of nodes to use.  (default: all nodes from resource 
         manager)
 
+    -l <list...>
+        specify the list of nodes, seperated by ':', for example:
+        host1:host2:host3 (default: localhost or detected in HPC)
+
     -p <dir> 
         use persistent HDFS and store namenode and datanode state on the shared 
         filesystem given by <dir> (default: n/a)
 
     -c <dir>
         build the resulting Hadoop config directory in <dr> (default: from 
-        user environment's HADOOP_CONF_DIR or myhadoop.conf)
+        user environment\'s HADOOP_CONF_DIR or myhadoop.conf)
 
     -s <dir>
         location of node-local scratch directory where datanode and tasktracker
-        will be stored.  (default: user environment's MH_SCRATCH_DIR or 
+        will be stored.  (default: user environment\'s MH_SCRATCH_DIR or 
         myhadoop.conf)
 
     -h <dir>
         location of Hadoop installation containing the myHadoop configuration
         templates in <dir>/conf and the 'hadoop' executable in <dir>/bin/hadoop
-        (default: user environment's HADOOP_HOME or myhadoop.conf)
+        (default: user environment\'s HADOOP_HOME or myhadoop.conf)
 
     -i <regular expression>
         transformation (passed to sed -e) to turn each hostname provided by the
@@ -61,6 +104,8 @@ if [ "z$1" == "z-?" ]; then
   exit 0
 fi
 
+
+MH_LIST_NODES=localhost
 function print_nodelist {
     if [ "z$RESOURCE_MGR" == "zpbs" ]; then
         cat $PBS_NODEFILE | sed -e "$MH_IPOIB_TRANSFORM"
@@ -68,26 +113,13 @@ function print_nodelist {
         cat $PE_NODEFILE | sed -e "$MH_IPOIB_TRANSFORM"
     elif [ "z$RESOURCE_MGR" == "zslurm" ]; then
         scontrol show hostname $SLURM_NODELIST | sed -e "$MH_IPOIB_TRANSFORM"
+    else
+        IFS=':'; array=($MH_LIST_NODES)
+        for i in "${!array[@]}"; do
+            echo "${array[i]}"
+        done
     fi
 }
-
-### Read in some system-wide configurations (if applicable) but do not override
-### the user's environment
-if [ -e "$MH_HOME/etc/myhadoop.conf" ]; then
-  while read line; do
-    rex='^[^# ]*='
-    if [[ $line =~ $rex ]]; then
-      variable=$(cut -d = -f1 <<< $line)
-      value=$(cut -d = -f 2- <<< $line)
-      if [ "z${!variable}" == "z" ]; then
-        eval "$variable=$value"
-        mh_print "Setting $variable=$value from myhadoop.conf"
-      else
-        mh_print "Keeping $variable=${!variable} from user environment"
-      fi
-    fi
-  done < $MH_HOME/etc/myhadoop.conf
-fi
 
 ### Detect our resource manager and populate necessary environment variables
 if [ "z$PBS_JOBID" != "z" ]; then
@@ -97,11 +129,10 @@ elif [ "z$PE_NODEFILE" != "z" ]; then
 elif [ "z$SLURM_JOBID" != "z" ]; then
     RESOURCE_MGR="slurm"
 else
-    echo "No resource manager detected.  Aborting." >&2
-    print_usage
-    exit 1
+    mh_print "Use default LAN cluster" >&2
 fi
 
+NODES=1
 if [ "z$RESOURCE_MGR" == "zpbs" ]; then
     NODES=$PBS_NUM_NODES
     NUMPROCS=$PBS_NP
@@ -116,8 +147,40 @@ elif [ "z$RESOURCE_MGR" == "zslurm" ]; then
     JOBID=$SLURM_JOBID
 fi
 
+## @fn read_config_file()
+## @brief Read in some system-wide configurations (if applicable) but do not override
+##        the user's environment
+## @param fn_conf the config file to be read
+##
+function read_config_file() {
+    local PARAM_FN_CONF="$1"
+    shift
+
+    mh_print "try to parse config file $1"
+    if [ -e "$PARAM_FN_CONF" ]; then
+        while read line; do
+            rex='^[^# ]*='
+            if [[ $line =~ $rex ]]; then
+                variable=$(cut -d = -f1 <<< $line)
+                value=$(cut -d = -f 2- <<< $line)
+                if [ "z${!variable}" == "z" ]; then
+                    eval "$variable=$value"
+                    mh_print "Setting $variable=$value from $PARAM_FN_CONF"
+                else
+                    mh_print "Keeping $variable=${!variable} from user environment"
+                fi
+            fi
+        done < "$PARAM_FN_CONF"
+    fi
+}
+
+# read default configure file
+read_config_file "$DN_EXEC/../etc/myhadoop.conf"
+read_config_file "$(pwd)/etc/myhadoop.conf"
+read_config_file "$(pwd)/myhadoop.conf"
+
 ### Parse arguments
-args=`getopt n:p:c:s:h:i:? $*`
+args=`getopt n:l:p:c:s:h:i:? $*`
 if test $? != 0
 then
     print_usage
@@ -129,6 +192,14 @@ do
     case "$i" in
         -n) shift;
             NODES=$1
+            shift;;
+
+        -l) shift;
+            # : splitted node list
+            MH_LIST_NODES=$1
+            IFS=':'; array=($MH_LIST_NODES)
+            NODES=${#array[*]}
+            #mh_print "Nodes (${NODES}) specified: ${MH_LIST_NODES}"; exit 0; # debug
             shift;;
 
         -p) shift;
@@ -189,7 +260,6 @@ if [ "z$MH_PERSIST_DIR" != "z" ]; then
     mh_print "Using directory $MH_PERSIST_DIR for persisting HDFS state..."
 fi
 
-   
 ### Create the config directory and begin populating it
 if [ -d $HADOOP_CONF_DIR ]; then
     i=0
@@ -272,6 +342,16 @@ export JAVA_HOME=$JAVA_HOME
 
 # Other job-specific environment variables follow:
 EOF
+
+# detect if the nodes are accessable
+for node in $(cat $HADOOP_CONF_DIR/slaves $HADOOP_CONF_DIR/masters | sort -u | head -n $NODES) ; do
+  RET=$(ssh_ensure_connection "$node")
+  if [ ! "$RET" = "0" ]; then
+    echo "You need to apply ssh-copy-id to all nodes"
+    echo "or use 'ssh-copy-id localhost'"
+    exit 2
+  fi
+done
 
 if [ "z$MH_PERSIST_DIR" != "z" ]; then
     ### Link HDFS data directories if persistent mode

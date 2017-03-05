@@ -62,3 +62,11 @@
 #   This is the location of the user's per-job Hadoop configuration directory.  
 #
 #HADOOP_CONF_DIR=$HOME/hadoop-conf.$PBS_JOBID
+
+################################################################################
+# Variable: MH_LIST_NODES
+# Command-line override: -l
+#
+#   Specify the list of nodes
+#
+#MH_LIST_NODES=host1:host2:host3
