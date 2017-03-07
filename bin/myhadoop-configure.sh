@@ -44,7 +44,7 @@ fi
 ssh_ensure_connection() {
     PARAM_SSHURL="${1}"
     echo "[DBG] test host: ${PARAM_SSHURL}" > /dev/stderr
-    $EXEC_SSH "${PARAM_SSHURL}" "ls > /dev/null"
+    ssh "${PARAM_SSHURL}" "ls > /dev/null"
     if [ ! "$?" = "0" ]; then
         #echo "[DBG] copy id to ${PARAM_SSHURL} ..."
         #ssh-copy-id -i ~/.ssh/id_rsa.pub "${PARAM_SSHURL}"
@@ -105,7 +105,7 @@ if [ "z$1" == "z-?" ]; then
 fi
 
 
-MH_LIST_NODES=localhost
+MH_LIST_NODES=
 function print_nodelist {
     if [ "z$RESOURCE_MGR" == "zpbs" ]; then
         cat $PBS_NODEFILE | sed -e "$MH_IPOIB_TRANSFORM"
@@ -120,32 +120,6 @@ function print_nodelist {
         done
     fi
 }
-
-### Detect our resource manager and populate necessary environment variables
-if [ "z$PBS_JOBID" != "z" ]; then
-    RESOURCE_MGR="pbs"
-elif [ "z$PE_NODEFILE" != "z" ]; then
-    RESOURCE_MGR="sge"
-elif [ "z$SLURM_JOBID" != "z" ]; then
-    RESOURCE_MGR="slurm"
-else
-    mh_print "Use default LAN cluster" >&2
-fi
-
-NODES=1
-if [ "z$RESOURCE_MGR" == "zpbs" ]; then
-    NODES=$PBS_NUM_NODES
-    NUMPROCS=$PBS_NP
-    JOBID=$PBS_JOBID
-elif [ "z$RESOURCE_MGR" == "zsge" ]; then
-    NODES=$NHOSTS
-    NUMPROCS=$NSLOTS
-    JOBID=$JOB_ID
-elif [ "z$RESOURCE_MGR" == "zslurm" ]; then
-    NODES=$SLURM_NNODES
-    NUMPROCS=$SLURM_NPROCS
-    JOBID=$SLURM_JOBID
-fi
 
 ## @fn read_config_file()
 ## @brief Read in some system-wide configurations (if applicable) but do not override
@@ -178,6 +152,34 @@ function read_config_file() {
 read_config_file "$DN_EXEC/../etc/myhadoop.conf"
 read_config_file "$(pwd)/etc/myhadoop.conf"
 read_config_file "$(pwd)/myhadoop.conf"
+
+IFS=':'; array=($MH_LIST_NODES)
+NODES=${#array[*]}
+
+### Detect our resource manager and populate necessary environment variables
+if [ "z$PBS_JOBID" != "z" ]; then
+    RESOURCE_MGR="pbs"
+elif [ "z$PE_NODEFILE" != "z" ]; then
+    RESOURCE_MGR="sge"
+elif [ "z$SLURM_JOBID" != "z" ]; then
+    RESOURCE_MGR="slurm"
+else
+    mh_print "Use default LAN cluster" >&2
+fi
+
+if [ "z$RESOURCE_MGR" == "zpbs" ]; then
+    NODES=$PBS_NUM_NODES
+    NUMPROCS=$PBS_NP
+    JOBID=$PBS_JOBID
+elif [ "z$RESOURCE_MGR" == "zsge" ]; then
+    NODES=$NHOSTS
+    NUMPROCS=$NSLOTS
+    JOBID=$JOB_ID
+elif [ "z$RESOURCE_MGR" == "zslurm" ]; then
+    NODES=$SLURM_NNODES
+    NUMPROCS=$SLURM_NPROCS
+    JOBID=$SLURM_JOBID
+fi
 
 ### Parse arguments
 args=`getopt n:l:p:c:s:h:i:? $*`
@@ -344,7 +346,8 @@ export JAVA_HOME=$JAVA_HOME
 EOF
 
 # detect if the nodes are accessable
-for node in $(cat $HADOOP_CONF_DIR/slaves $HADOOP_CONF_DIR/masters | sort -u | head -n $NODES) ; do
+cat $HADOOP_CONF_DIR/slaves $HADOOP_CONF_DIR/masters | sort -u | head -n $NODES | while read node ; do
+  mh_print "try ssh $node ..."
   RET=$(ssh_ensure_connection "$node")
   if [ ! "$RET" = "0" ]; then
     echo "You need to apply ssh-copy-id to all nodes"
